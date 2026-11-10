@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BALE PERABOT V25</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+<script>
+
+async function editProduct(id){
+ try{
+  await needAdmin();
+  const {data:p,error}=await sb.from('products').select('id,code,barcode,name,category_id,selling_price,stock,min_stock').eq('id',id).single();
+  if(error)throw error;
+  const {data:c,error:ce}=await sb.from('product_costs').select('cost_price').eq('product_id',id).maybeSingle();
+  if(ce)throw ce;
+  const code=prompt('Kode barang:',p.code);if(code===null)return;
+  const name=prompt('Nama barang:',p.name);if(name===null)return;
+  const price=prompt('Harga jual:',p.selling_price);if(price===null)return;
+  const cost=prompt('Harga modal:',c?.cost_price??0);if(cost===null)return;
+  const stock=prompt('Stok:',p.stock);if(stock===null)return;
+  const min=prompt('Batas stok minimum:',p.min_stock);if(min===null)return;
+  const nums=[Number(price),Number(cost),Number(stock),Number(min)];
+  if(!code.trim()||!name.trim()||nums.some(v=>!Number.isFinite(v)||v<0))throw Error('Data tidak valid. Periksa kode, nama, dan angka.');
+  const {error:up}=await sb.from('products').update({code:code.trim(),name:name.trim(),selling_price:nums[0],stock:nums[2],min_stock:nums[3]}).eq('id',id);
+  if(up)throw up;
+  const {error:uc}=await sb.from('product_costs').upsert({product_id:id,cost_price:nums[1]},{onConflict:'product_id'});
+  if(uc)throw Error('Data barang sudah diperbarui, tetapi harga modal gagal diperbarui: '+uc.message);
+  alert('Barang berhasil diperbarui.');
+  await loadData();
+ }catch(e){alert('Gagal mengedit barang: '+e.message);}
+}
+async function deleteProduct(id,name){
+ try{
+  await needAdmin();
+  if(!confirm('Yakin ingin menghapus "'+name+'"? Penghapusan hanya berhasil jika barang belum dipakai dalam transaksi atau riwayat stok.'))return;
+  const {error}=await sb.from('products').delete().eq('id',id);
+  if(error)throw error;
+  await sb.from('product_costs').delete().eq('product_id',id);
+  alert('Barang berhasil dihapus.');
+  await loadData();
+ }catch(e){alert('Barang tidak dihapus: '+e.message+'\\nJika barang sudah pernah dipakai dalam transaksi/riwayat stok, sebaiknya jangan dihapus.');}
+}
+
+
+async function loadSales(){
+ try{
+  await guard();
+  const {data,error}=await sb.from('sales').select('id,invoice_number,total,paid_amount,payment_method,payment_status,created_at').order('created_at',{ascending:false}).limit(50);
+  if(error)throw error;
+  if(!data.length){$('salesHistory').textContent='Belum ada transaksi.';return;}
+  window._baleSales=data;
+  $('salesHistory').innerHTML='<table><thead><tr><th>Invoice</th><th>Total</th><th>Status</th><th>Struk</th></tr></thead><tbody>'+data.map((x,i)=>`<tr><td>${esc(x.invoice_number||'-')}<br><span class="small">${new Date(x.created_at).toLocaleString('id-ID')}</span></td><td>${rupiah(x.total)}</td><td>${esc(x.payment_status||'-')}</td><td><button class="secondary" onclick="showReceipt(${i})">Lihat / Cetak</button></td></tr>`).join('')+'</tbody></table>';
+ }catch(e){$('salesHistory').textContent='Gagal memuat riwayat: '+e.message;}
+}
+function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function showReceipt(i){
+ try{
+  const sale=window._baleSales?.[i];if(!sale)throw Error('Transaksi tidak ditemukan.');
+  const {data:items,error}=await sb.from('sale_items').select('product_name,quantity,selling_price,subtotal').eq('sale_id',sale.id);
+  if(error)throw error;
+  const lines=(items||[]).map(x=>`<tr><td>${esc(x.product_name)} × ${x.quantity}</td><td style="text-align:right">${rupiah(x.subtotal)}</td></tr>`).join('');
+  const w=window.open('','_blank');if(!w)throw Error('Pop-up diblokir. Izinkan pop-up untuk mencetak struk.');
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Struk ${esc(sale.invoice_number)}</title><style>body{font:14px Arial;max-width:320px;margin:20px auto;color:#111}h2,p{text-align:center;margin:5px}table{width:100%;border-collapse:collapse;margin:16px 0}td{padding:7px 0;border-bottom:1px dashed #aaa}.total{font-weight:bold;font-size:17px;text-align:right}.muted{text-align:center;color:#555;font-size:12px}@media print{button{display:none}}</style></head><body><h2>BALE PERABOT</h2><p>Struk Pembelian</p><p class="muted">${esc(sale.invoice_number||'')}</p><p class="muted">${new Date(sale.created_at).toLocaleString('id-ID')}</p><hr><table>${lines}</table><p class="total">Total: ${rupiah(sale.total)}</p><p>Bayar: ${rupiah(sale.paid_amount)}</p><p>Metode: ${esc(sale.payment_method)}</p><p>Status: ${esc(sale.payment_status)}</p><hr><p>Terima kasih telah berbelanja</p><p class="muted">BALE PERABOT</p><button onclick="window.print()">Cetak struk</button></body></html>`);
+  w.document.close();
+ }catch(e){alert('Struk gagal dibuka: '+e.message);}
+}
+async function loadReport(){
+ try{
+  await guard();
+  const {data:sales,error}=await sb.from('sales').select('id,total,payment_status,created_at').order('created_at',{ascending:false});
+  if(error)throw error;
+  const paid=(sales||[]).filter(x=>x.payment_status==='paid');
+  const ids=paid.map(x=>x.id);
+  let items=[];
+  if(ids.length){
+   const {data,error:ie}=await sb.from('sale_items').select('sale_id,product_id,quantity,cost_price,selling_price,subtotal').in('sale_id',ids);
+   if(ie)throw ie;
+   items=data||[];
+  }
+  // For old sale items whose saved cost is zero, use the product's current cost as an estimate only.
+  const missingProductIds=[...new Set(items.filter(x=>(x.cost_price===null||Number(x.cost_price)<=0)&&x.product_id).map(x=>x.product_id))];
+  let currentCosts=new Map();
+  if(missingProductIds.length){
+   const {data:costRows,error:ce}=await sb.from('product_costs').select('product_id,cost_price').in('product_id',missingProductIds);
+   if(ce)throw ce;
+   currentCosts=new Map((costRows||[]).map(x=>[x.product_id,Number(x.cost_price)]));
+  }
+  let modal=0,knownRevenue=0,estimatedCount=0,unknownCount=0;
+  for(const x of items){
+   let c=Number(x.cost_price||0);
+   if(c<=0 && x.product_id && currentCosts.has(x.product_id)){
+    c=currentCosts.get(x.product_id);estimatedCount++;
+   }else if(c<=0){unknownCount++;}
+   else{}
+   if(c>0){
+    modal+=c*Number(x.quantity||0);
+    knownRevenue+=Number(x.subtotal||0);
+   }
+  }
+  const profit=knownRevenue-modal;
+  const total=paid.reduce((a,x)=>a+Number(x.total||0),0);
+  const today=new Date().toLocaleDateString('en-CA');
+  const todays=paid.filter(x=>new Date(x.created_at).toLocaleDateString('en-CA')===today);
+  const todayTotal=todays.reduce((a,x)=>a+Number(x.total||0),0);
+  $('report').innerHTML=`<p>Total transaksi lunas: <b>${paid.length}</b></p><p>Omzet seluruh transaksi: <b>${rupiah(total)}</b></p><p>Omzet hari ini: <b>${rupiah(todayTotal)}</b></p><p>Modal barang terhitung: <b>${rupiah(modal)}</b></p><p>Perkiraan laba kotor: <b>${rupiah(profit)}</b></p><p class="small">Catatan: ${estimatedCount?estimatedCount+' rincian transaksi memakai harga modal barang saat ini sebagai perkiraan, bukan catatan modal historis. ':''}${unknownCount?unknownCount+' rincian belum memiliki data harga modal. ':''}Laporan ini belum mengurangi pengeluaran toko, jadi belum merupakan laba bersih.</p>`;
+ }catch(e){$('report').textContent='Laporan gagal dimuat: '+e.message;}
+}
+
+
+window.loadReport = loadReport;
+document.addEventListener('DOMContentLoaded',()=>{const b=document.getElementById('reportBtn');if(b)b.addEventListener('click',()=>loadReport());});
+
+
+async function saveCost(){
+ try{
+  await guard();
+  const id=$('costProduct').value, value=Number($('costValue').value);
+  if(!id)throw Error('Pilih barang terlebih dahulu.');
+  if($('costValue').value===''||!Number.isFinite(value)||value<0)throw Error('Masukkan harga modal yang benar.');
+  const {error}=await sb.from('product_costs').upsert({product_id:id,cost_price:value},{onConflict:'product_id'});
+  if(error)throw error;
+  msg('costMsg','Harga modal berhasil disimpan online.','ok');
+ }catch(e){msg('costMsg',e.message,'err');}
+}
+
+
+async function repairOldCost(){
+ try{
+  await guard();
+  const productId=$('repairProduct').value;
+  if(!productId)throw Error('Pilih barang terlebih dahulu.');
+  const {data:costRow,error:ce}=await sb.from('product_costs').select('cost_price').eq('product_id',productId).maybeSingle();
+  if(ce)throw ce;
+  if(!costRow||costRow.cost_price===null||Number(costRow.cost_price)<=0)throw Error('Harga modal barang belum tersedia atau masih nol. Simpan harga modal terlebih dahulu.');
+  const cost=Number(costRow.cost_price);
+  const {data:oldRows,error:oe}=await sb.from('sale_items').select('id,sale_id,quantity,cost_price').eq('product_id',productId).or('cost_price.is.null,cost_price.eq.0');
+  if(oe)throw oe;
+  if(!oldRows||!oldRows.length){msg('repairMsg','Tidak ada rincian transaksi dengan modal nol untuk barang ini.','ok');return;}
+  const totalQty=oldRows.reduce((a,x)=>a+Number(x.quantity||0),0);
+  if(!confirm('Akan memperbarui '+oldRows.length+' rincian transaksi, total '+totalQty+' unit, memakai modal Rp '+cost.toLocaleString('id-ID')+' per unit. Ini memakai harga modal saat ini sebagai perkiraan historis. Lanjutkan?'))return;
+  let updated=0;
+  for(const row of oldRows){
+   const {error:ue}=await sb.from('sale_items').update({cost_price:cost}).eq('id',row.id);
+   if(ue)throw Error('Sebagian data mungkin sudah diperbarui ('+updated+' baris). Gagal pada baris berikutnya: '+ue.message);
+   updated++;
+  }
+  msg('repairMsg',updated+' rincian transaksi berhasil diperbarui. Tekan Hitung laporan untuk melihat hasilnya.','ok');
+ }catch(e){msg('repairMsg',e.message,'err');}
+}
+
+
+</script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f1f4f8;color:#202938;font:16px Arial,sans-serif}
+header{background:#14532d;color:white;padding:25px 20px}header h1{margin:0 0 12px;font-size:30px}header p{margin:0;font-size:17px}
+main{max-width:760px;margin:22px auto;padding:0 14px}.card{background:white;border-radius:18px;padding:22px;margin:0 0 18px;box-shadow:0 4px 18px #14213d10}
+h2{margin:0 0 18px;font-size:23px}label{display:block;margin:14px 0 7px;color:#4b5563}
+input,select{width:100%;padding:14px;border:1px solid #cbd5e1;border-radius:10px;font-size:16px;background:white}
+button{border:0;border-radius:10px;padding:13px 18px;background:#16834a;color:white;font-size:16px;margin-top:12px}
+button.secondary{background:#475569}button:disabled{opacity:.55}#scanCode{border:2px solid #16834a;font-size:18px;font-weight:bold}
+.note{padding:13px;border-radius:10px;background:#eff6ff;color:#1e40af;line-height:1.45;overflow-wrap:anywhere}
+.err{background:#fff1f2;color:#9f1239}.ok{background:#ecfdf5;color:#166534}
+.small{font-size:14px;color:#64748b;line-height:1.45}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+table{width:100%;border-collapse:collapse;margin-top:12px}td,th{text-align:left;padding:10px 6px;border-bottom:1px solid #e2e8f0;font-size:14px}
+@media(max-width:520px){.row{grid-template-columns:1fr}header h1{font-size:27px}}
+</style></head>
+<body>
+<header><h1>BALE PERABOT</h1><p>V29 — Scan Barcode, Transaksi, dan Cetak Label</p></header>
+<main>
+<section class="card">
+<h2>1. Koneksi dan login Admin</h2>
+<label>Project URL</label><input id="url" placeholder="https://xxxx.supabase.co">
+<label>Publishable Key</label><input id="key" placeholder="sb_publishable_...">
+<button onclick="saveConfig()">Simpan koneksi</button><div id="conn" class="note">Belum tersambung.</div>
+<label>Email Admin</label><input id="email" type="email" placeholder="Email Admin">
+<label>Password</label><input id="password" type="password" placeholder="Password Admin">
+<button onclick="login()">Login Admin</button><button class="secondary" onclick="logout()">Keluar</button>
+<div id="auth" class="note">Belum login.</div>
+</section>
+<section class="card">
+<h2>2. Transaksi penjualan</h2>
+<label>Scan barcode (scanner USB atau kamera HP)</label>
+<input id="scanCode" inputmode="none" autocomplete="off" placeholder="Arahkan scanner / ketik kode lalu Enter">
+<button type="button" onclick="scanByCode()">Masukkan barcode</button>
+<div class="row">
+<button type="button" onclick="startCamera()">Buka kamera untuk scan</button>
+<button type="button" class="secondary" onclick="stopCamera()">Tutup kamera</button>
+</div>
+<video id="scanVideo" playsinline muted style="display:none;width:100%;max-height:260px;background:#111;border-radius:12px;margin-top:10px"></video>
+<div id="scanMsg" class="note">Scan barcode untuk memasukkan barang ke keranjang.</div>
+<label>Pilih barang</label><select id="product"><option value="">Memuat barang...</option></select>
+<label>Jumlah</label><input id="qty" type="number" min="1" value="1">
+<button onclick="addCart()">Tambah ke keranjang</button>
+<div id="cart"></div>
+<div class="note" style="margin-top:14px">Total belanja: <strong id="total">Rp 0</strong></div>
+<label>Metode pembayaran</label><select id="method"><option value="cash">Tunai</option><option value="transfer">Transfer</option><option value="qris">QRIS</option></select>
+<button onclick="checkout()">Simpan transaksi lunas</button>
+<div id="saleMsg" class="note">Belum ada transaksi.</div>
+</section>
+<section class="card">
+<h2>3. Barang tersedia</h2><button class="secondary" onclick="loadProducts()">Muat ulang barang</button>
+<div id="productList" class="small">Login Admin untuk melihat barang.</div>
+</section>
+
+<section class="card">
+<h2>4. Barcode dan cetak label barang</h2>
+<p class="small">Barcode memakai kode barang. Kode barang harus unik, misalnya BP000001. Simpan barcode terlebih dahulu agar tersimpan di database dan ikut tersinkron ke HP/laptop.</p>
+<button class="secondary" onclick="saveAllBarcodes()">Buat/simpan barcode semua barang</button>
+<div id="barcodeMsg" class="note">Login Admin untuk mengelola barcode.</div>
+<label>Pilih barang untuk cetak label</label><select id="labelProduct"><option value="">Pilih barang</option></select>
+<label>Jumlah label</label><input id="labelQty" type="number" min="1" max="200" value="1">
+<button onclick="printSelectedLabels()">Cetak label barang ini</button>
+<button class="secondary" onclick="printAllLabels()">Cetak satu label setiap barang</button>
+<p class="small">Susunan kertas A4: 4 kolom ke samping × 8 baris ke bawah (32 label per halaman). Ukuran dan jarak dapat disesuaikan nanti mengikuti merek/ukuran kertas stiker yang kamu pakai. Saat mencetak, pilih kertas A4 dan skala 100%.</p>
+</section>
+<section class="card">
+<h2>5. Riwayat penjualan & struk</h2>
+<button class="secondary" onclick="loadSales()">Muat riwayat penjualan</button>
+<div id="salesHistory" class="small">Login Admin untuk melihat riwayat.</div>
+</section>
+<section class="card">
+<h2>6. Atur harga modal barang</h2>
+<p class="small">Pilih barang dan simpan harga modalnya. Harga ini akan digunakan untuk menghitung laba transaksi berikutnya.</p>
+<label>Barang</label><select id="costProduct"><option value="">Pilih barang</option></select>
+<label>Harga modal (Rp)</label><input id="costValue" type="number" min="0" placeholder="Contoh: 5000">
+<button onclick="saveCost()">Simpan harga modal</button>
+<div id="costMsg" class="note">Belum ada perubahan.</div>
+</section>
+<section class="card">
+<h2>7. Perbaiki modal transaksi lama</h2>
+<p class="small">Fitur ini mengisi harga modal pada rincian transaksi lama yang masih nol, memakai harga modal barang saat ini. Gunakan hanya untuk barang yang harga modal lamanya memang sama.</p>
+<label>Barang yang akan diperbaiki</label><select id="repairProduct"><option value="">Pilih barang</option></select>
+<button onclick="repairOldCost()">Perbaiki modal transaksi lama</button>
+<div id="repairMsg" class="note">Belum ada perubahan.</div>
+</section>
+<section class="card">
+<h2>8. Ringkasan penjualan</h2>
+<button type="button" id="reportBtn" class="secondary">Hitung laporan</button>
+<div id="report" class="small">Tekan Hitung laporan untuk melihat ringkasan.</div>
+</section>
+</main>
+<script>
+let sb=null, profile=null, products=[], cart=[];
+const $=id=>document.getElementById(id);
+const rupiah=n=>'Rp '+Number(n||0).toLocaleString('id-ID');
+function msg(id,t,k='note'){let e=$(id);e.className='note '+(k==='err'?'err':k==='ok'?'ok':'');e.textContent=t;}
+function saveConfig(){let u=$('url').value.trim().replace(/\/+$/,''),k=$('key').value.trim();if(!/^https:\/\/[a-zA-Z0-9-]+\.supabase\.co$/.test(u)||!k){msg('conn','Periksa Project URL dan Publishable Key. Jangan gunakan Service Role Key.','err');return;}localStorage.setItem('bale_v13_url',u);localStorage.setItem('bale_v13_key',k);init();msg('conn','Koneksi tersimpan di perangkat ini.','ok');}
+function init(){let u=localStorage.getItem('bale_v13_url'),k=localStorage.getItem('bale_v13_key');if(!u||!k||!window.supabase)return false;sb=window.supabase.createClient(u,k);return true;}
+async function login(){if(!sb&&!init()){msg('conn','Simpan koneksi terlebih dahulu.','err');return;}let {data,error}=await sb.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error){msg('auth','Login gagal: '+error.message,'err');return;}let {data:u}=await sb.auth.getUser();let {data:p,error:pe}=await sb.from('profiles').select('id,full_name,role').eq('id',u.user.id).maybeSingle();if(pe||!p||p.role!=='admin'){msg('auth','Profil Admin tidak ditemukan atau role bukan admin. '+(pe?.message||''),'err');return;}profile=p;msg('auth','Login Admin berhasil.','ok');await loadProducts();}
+async function logout(){stopCamera();if(sb)await sb.auth.signOut();profile=null;products=[];cart=[];renderCart();msg('auth','Sudah keluar.');}
+async function guard(){if(!sb&&!init())throw Error('Simpan koneksi terlebih dahulu.');if(!profile)throw Error('Login Admin terlebih dahulu.');}
+async function loadProducts(){try{await guard();let {data,error}=await sb.from('products').select('id,code,barcode,name,selling_price,stock').order('name');if(error)throw error;products=data||[];$('product').innerHTML='<option value="">Pilih barang</option>'+products.map(p=>`<option value="${p.id}">${p.name} — stok ${p.stock} — ${rupiah(p.selling_price)}</option>`).join('');$('costProduct').innerHTML='<option value="">Pilih barang</option>'+products.map(p=>`<option value="${p.id}">${p.name} (${p.code})</option>`).join('');$('repairProduct').innerHTML='<option value="">Pilih barang</option>'+products.map(p=>`<option value="${p.id}">${p.name} (${p.code})</option>`).join('');$('labelProduct').innerHTML='<option value="">Pilih barang</option>'+products.map(p=>`<option value="${p.id}">${p.name} (${p.code})</option>`).join('');$('productList').innerHTML=products.map(p=>`${p.code} — ${p.name} | stok ${p.stock} | ${rupiah(p.selling_price)} | barcode: ${p.barcode||p.code||'belum ada'}`).join('<br>')||'Belum ada barang.'; }catch(e){msg('auth',e.message,'err');}}
+
+async function saveAllBarcodes(){
+ try{
+  await guard();if(!products.length)await loadProducts();
+  let saved=0;
+  for(const p of products){
+   const code=String(p.barcode||p.code||'').trim();
+   if(!code)continue;
+   if(p.barcode===code)continue;
+   const {error}=await sb.from('products').update({barcode:code}).eq('id',p.id);
+   if(error)throw Error('Gagal menyimpan barcode '+p.name+': '+error.message);
+   p.barcode=code;saved++;
+  }
+  msg('barcodeMsg','Selesai. '+saved+' barcode baru disimpan. Barang yang sudah punya barcode tidak diubah.','ok');
+  await loadProducts();
+ }catch(e){msg('barcodeMsg',e.message,'err');}
+}
+function makeBarcodeSvg(value){
+ if(!window.JsBarcode)throw Error('Library barcode belum termuat. Periksa koneksi internet lalu muat ulang aplikasi.');
+ const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+ window.JsBarcode(svg,String(value),{format:'CODE128',displayValue:true,font:'Arial',fontSize:9,width:1.15,height:22,margin:0,lineColor:'#000',background:'#fff'});
+ return svg.outerHTML;
+}
+function labelHtml(p){
+ const code=String(p.barcode||p.code||'').trim();
+ if(!code)throw Error('Kode/barcode '+p.name+' masih kosong.');
+ return `<div class="label"><div class="name">${esc(p.name)}</div>${makeBarcodeSvg(code)}<div class="price">${rupiah(p.selling_price)}</div></div>`;
+}
+function printLabels(list){
+ if(!list.length)throw Error('Tidak ada barang untuk dicetak.');
+ const labels=list.map(labelHtml).join('');
+ const w=window.open('','_blank');if(!w)throw Error('Pop-up diblokir. Izinkan pop-up untuk mencetak label.');
+ w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Label Barcode BALE PERABOT</title><style>
+ @page{size:A4 portrait;margin:8mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#000}.sheet{display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:32mm;gap:2mm}.label{border:1px dashed #bbb;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1.5mm;overflow:hidden;text-align:center}.name{font-size:8pt;font-weight:bold;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.label svg{width:62%;max-width:34mm;max-height:10mm}.price{font-size:12pt;font-weight:bold;margin-top:1mm}@media print{.label{border-color:transparent}}
+ </style></head><body><div class="sheet">${labels}</div><script>window.onload=()=>setTimeout(()=>window.print(),350)<\/script></body></html>`);
+ w.document.close();
+}
+function printSelectedLabels(){
+ try{const p=products.find(x=>x.id===$('labelProduct').value);if(!p)throw Error('Pilih barang terlebih dahulu.');const q=Number($('labelQty').value);if(!Number.isInteger(q)||q<1||q>200)throw Error('Jumlah label harus 1 sampai 200.');printLabels(Array.from({length:q},()=>p));}catch(e){msg('barcodeMsg',e.message,'err');}
+}
+function printAllLabels(){try{if(!products.length)throw Error('Belum ada data barang.');printLabels(products);}catch(e){msg('barcodeMsg',e.message,'err');}}
+
+function addScannedProduct(raw){
+ const code=String(raw||'').trim();
+ if(!code)return msg('scanMsg','Barcode masih kosong.','err');
+ const p=products.find(x=>String(x.barcode||x.code||'').trim().toLowerCase()===code.toLowerCase());
+ if(!p)return msg('scanMsg','Barcode '+code+' tidak ditemukan. Periksa barcode barang atau muat ulang barang.','err');
+ if(Number(p.stock)<1)return msg('scanMsg','Stok '+p.name+' habis.','err');
+ const line=cart.find(x=>x.id===p.id);
+ if(line){if(line.qty+1>Number(p.stock))return msg('scanMsg','Jumlah '+p.name+' di keranjang sudah mencapai stok.','err');line.qty+=1;}
+ else cart.push({id:p.id,code:p.code,name:p.name,price:Number(p.selling_price),qty:1});
+ renderCart();
+ $('product').value=p.id;
+ $('qty').value='1';
+ $('scanCode').value='';
+ msg('scanMsg',p.name+' berhasil ditambahkan (1 buah).','ok');
+ $('scanCode').focus();
+}
+function scanByCode(){
+ const input=$('scanCode');
+ const code=input.value.trim();
+ addScannedProduct(code);
+}
+$('scanCode').addEventListener('keydown',function(e){
+ if(e.key==='Enter'){e.preventDefault();scanByCode();}
+});
+let scanStream=null,scanActive=false,scanDetector=null,scanFrame=0,lastCameraCode='',lastCameraAt=0;
+async function startCamera(){
+ try{
+  await guard();
+  if(!('BarcodeDetector' in window))throw Error('Browser ini belum mendukung pemindai barcode kamera. Gunakan scanner USB/Bluetooth atau kolom scan.');
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw Error('Akses kamera tidak tersedia. Buka aplikasi melalui HTTPS atau gunakan scanner USB/Bluetooth.');
+  stopCamera();
+  scanDetector=new BarcodeDetector({formats:['code_128','ean_13','ean_8','upc_a','upc_e','code_39','itf']});
+  scanStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+  const video=$('scanVideo');video.srcObject=scanStream;video.style.display='block';await video.play();
+  scanActive=true;msg('scanMsg','Kamera aktif. Arahkan barcode ke kotak kamera.','ok');
+  const detect=async()=>{
+   if(!scanActive)return;
+   try{
+    if(video.readyState>=2){
+     const found=await scanDetector.detect(video);
+     if(found&&found.length){
+      const code=found[0].rawValue;
+      const now=Date.now();
+      if(code&&(code!==lastCameraCode||now-lastCameraAt>1800)){
+       lastCameraCode=code;lastCameraAt=now;addScannedProduct(code);
+      }
+     }
+    }
+   }catch(e){}
+   if(scanActive)scanFrame=requestAnimationFrame(detect);
+  };
+  detect();
+ }catch(e){stopCamera();msg('scanMsg',e.message,'err');}
+}
+function stopCamera(){
+ scanActive=false;
+ if(scanFrame)cancelAnimationFrame(scanFrame);
+ if(scanStream){scanStream.getTracks().forEach(t=>t.stop());scanStream=null;}
+ const video=$('scanVideo');if(video){video.pause();video.srcObject=null;video.style.display='none';}
+}
+
+function addCart(){let p=products.find(x=>x.id===$('product').value),q=Number($('qty').value);if(!p)return msg('saleMsg','Pilih barang dahulu.','err');if(!Number.isInteger(q)||q<1)return msg('saleMsg','Jumlah harus minimal 1.','err');if(q>p.stock)return msg('saleMsg','Jumlah melebihi stok tersedia.','err');let line=cart.find(x=>x.id===p.id);if(line){if(line.qty+q>p.stock)return msg('saleMsg','Jumlah keranjang melebihi stok.','err');line.qty+=q;}else cart.push({id:p.id,code:p.code,name:p.name,price:Number(p.selling_price),qty:q});renderCart();}
+function renderCart(){let total=cart.reduce((a,x)=>a+x.price*x.qty,0);$('total').textContent=rupiah(total);$('cart').innerHTML=cart.map((x,i)=>`<div style="padding:10px 0;border-bottom:1px solid #ddd">${x.name} × ${x.qty} — ${rupiah(x.price*x.qty)} <button class="secondary" onclick="removeLine(${i})">Hapus</button></div>`).join('')||'<p class="small">Keranjang masih kosong.</p>';}
+function removeLine(i){cart.splice(i,1);renderCart();}
+async function checkout(){
+ try{
+ await guard();if(!cart.length)throw Error('Keranjang masih kosong.');
+ for(const x of cart){let p=products.find(y=>y.id===x.id);if(!p||x.qty>p.stock)throw Error('Stok '+x.name+' berubah. Muat ulang barang dahulu.');}
+ const total=cart.reduce((a,x)=>a+x.price*x.qty,0);
+ // Ambil harga modal terbaru sebelum transaksi; jangan simpan transaksi jika modal tidak tersedia.
+ const costIds=cart.map(x=>x.id);
+ const {data:costRows,error:costError}=await sb.from('product_costs').select('product_id,cost_price').in('product_id',costIds);
+ if(costError)throw Error('Harga modal gagal dibaca: '+costError.message);
+ const costMap=new Map((costRows||[]).map(r=>[r.product_id,Number(r.cost_price)]));
+ for(const x of cart){if(!costMap.has(x.id)||!Number.isFinite(costMap.get(x.id)))throw Error('Harga modal '+x.name+' belum tersedia. Lengkapi harga modal barang sebelum transaksi.');}
+ if(!confirm('Pastikan pembayaran sudah diterima penuh sebesar '+rupiah(total)+'. Lanjut simpan transaksi?'))return;
+ const invoice='BP-'+Date.now();
+ // Sequential writes: this is a controlled first transaction test, not yet an atomic database transaction.
+ const {data:sale,error:se}=await sb.from('sales').insert({invoice_number:invoice,cashier_id:profile.id,customer_id:null,total,paid_amount:total,payment_method:$('method').value,payment_status:'paid'}).select('id').single();
+ if(se)throw Error('Transaksi belum tersimpan: '+se.message);
+ const items=cart.map(x=>({sale_id:sale.id,product_id:x.id,product_name:x.name,quantity:x.qty,cost_price:costMap.get(x.id),selling_price:x.price,subtotal:x.price*x.qty}));
+ const {error:ie}=await sb.from('sale_items').insert(items);
+ if(ie)throw Error('Nomor transaksi '+invoice+' sudah tercatat, tetapi rincian gagal disimpan. Jangan ulangi transaksi. Hubungi admin untuk pemeriksaan: '+ie.message);
+ for(const x of cart){const p=products.find(y=>y.id===x.id);const {error:ue}=await sb.from('products').update({stock:p.stock-x.qty}).eq('id',x.id);if(ue)throw Error('Transaksi '+invoice+' tercatat, tetapi stok '+x.name+' gagal diperbarui. Jangan ulangi transaksi. Perlu pemeriksaan: '+ue.message);}
+ cart=[];renderCart();msg('saleMsg','Transaksi berhasil: '+invoice+'. Pembayaran lunas. Stok sudah diperbarui.','ok');await loadProducts();
+ }catch(e){msg('saleMsg',e.message,'err');}
+}
+(function(){let u=localStorage.getItem('bale_v13_url'),k=localStorage.getItem('bale_v13_key');if(u)$('url').value=u;if(k)$('key').value=k;if(u&&k){init();msg('conn','Pengaturan koneksi ditemukan di perangkat ini.','ok');}})();
+
+async function loadSales(){
+ try{
+  await guard();
+  const {data,error}=await sb.from('sales').select('id,invoice_number,total,paid_amount,payment_method,payment_status,created_at').order('created_at',{ascending:false}).limit(50);
+  if(error)throw error;
+  if(!data.length){$('salesHistory').textContent='Belum ada transaksi.';return;}
+  window._baleSales=data;
+  $('salesHistory').innerHTML='<table><thead><tr><th>Invoice</th><th>Total</th><th>Status</th><th>Struk</th></tr></thead><tbody>'+data.map((x,i)=>`<tr><td>${esc(x.invoice_number||'-')}<br><span class="small">${new Date(x.created_at).toLocaleString('id-ID')}</span></td><td>${rupiah(x.total)}</td><td>${esc(x.payment_status||'-')}</td><td><button class="secondary" onclick="showReceipt(${i})">Lihat / Cetak</button></td></tr>`).join('')+'</tbody></table>';
+ }catch(e){$('salesHistory').textContent='Gagal memuat riwayat: '+e.message;}
+}
+function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function showReceipt(i){
+ try{
+  const sale=window._baleSales?.[i];if(!sale)throw Error('Transaksi tidak ditemukan.');
+  const {data:items,error}=await sb.from('sale_items').select('product_name,quantity,selling_price,subtotal').eq('sale_id',sale.id);
+  if(error)throw error;
+  const lines=(items||[]).map(x=>`<tr><td>${esc(x.product_name)} × ${x.quantity}</td><td style="text-align:right">${rupiah(x.subtotal)}</td></tr>`).join('');
+  const w=window.open('','_blank');if(!w)throw Error('Pop-up diblokir. Izinkan pop-up untuk mencetak struk.');
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Struk ${esc(sale.invoice_number)}</title><style>body{font:14px Arial;max-width:320px;margin:20px auto;color:#111}h2,p{text-align:center;margin:5px}table{width:100%;border-collapse:collapse;margin:16px 0}td{padding:7px 0;border-bottom:1px dashed #aaa}.total{font-weight:bold;font-size:17px;text-align:right}.muted{text-align:center;color:#555;font-size:12px}@media print{button{display:none}}</style></head><body><h2>BALE PERABOT</h2><p>Struk Pembelian</p><p class="muted">${esc(sale.invoice_number||'')}</p><p class="muted">${new Date(sale.created_at).toLocaleString('id-ID')}</p><hr><table>${lines}</table><p class="total">Total: ${rupiah(sale.total)}</p><p>Bayar: ${rupiah(sale.paid_amount)}</p><p>Metode: ${esc(sale.payment_method)}</p><p>Status: ${esc(sale.payment_status)}</p><hr><p>Terima kasih telah berbelanja</p><p class="muted">BALE PERABOT</p><button onclick="window.print()">Cetak struk</button></body></html>`);
+  w.document.close();
+ }catch(e){alert('Struk gagal dibuka: '+e.message);}
+}
+async function saveCost(){
+ try{
+  await guard();
+  const id=$('costProduct').value, value=Number($('costValue').value);
+  if(!id)throw Error('Pilih barang terlebih dahulu.');
+  if($('costValue').value===''||!Number.isFinite(value)||value<0)throw Error('Masukkan harga modal yang benar.');
+  const {error}=await sb.from('product_costs').upsert({product_id:id,cost_price:value},{onConflict:'product_id'});
+  if(error)throw error;
+  msg('costMsg','Harga modal berhasil disimpan online.','ok');
+ }catch(e){msg('costMsg',e.message,'err');}
+}
+
+
+async function repairOldCost(){
+ try{
+  await guard();
+  const productId=$('repairProduct').value;
+  if(!productId)throw Error('Pilih barang terlebih dahulu.');
+  const {data:costRow,error:ce}=await sb.from('product_costs').select('cost_price').eq('product_id',productId).maybeSingle();
+  if(ce)throw ce;
+  if(!costRow||costRow.cost_price===null||Number(costRow.cost_price)<=0)throw Error('Harga modal barang belum tersedia atau masih nol. Simpan harga modal terlebih dahulu.');
+  const cost=Number(costRow.cost_price);
+  const {data:oldRows,error:oe}=await sb.from('sale_items').select('id,sale_id,quantity,cost_price').eq('product_id',productId).or('cost_price.is.null,cost_price.eq.0');
+  if(oe)throw oe;
+  if(!oldRows||!oldRows.length){msg('repairMsg','Tidak ada rincian transaksi dengan modal nol untuk barang ini.','ok');return;}
+  const totalQty=oldRows.reduce((a,x)=>a+Number(x.quantity||0),0);
+  if(!confirm('Akan memperbarui '+oldRows.length+' rincian transaksi, total '+totalQty+' unit, memakai modal Rp '+cost.toLocaleString('id-ID')+' per unit. Ini memakai harga modal saat ini sebagai perkiraan historis. Lanjutkan?'))return;
+  let updated=0;
+  for(const row of oldRows){
+   const {error:ue}=await sb.from('sale_items').update({cost_price:cost}).eq('id',row.id);
+   if(ue)throw Error('Sebagian data mungkin sudah diperbarui ('+updated+' baris). Gagal pada baris berikutnya: '+ue.message);
+   updated++;
+  }
+  msg('repairMsg',updated+' rincian transaksi berhasil diperbarui. Tekan Hitung laporan untuk melihat hasilnya.','ok');
+ }catch(e){msg('repairMsg',e.message,'err');}
+}
+
+</script></body></html>
