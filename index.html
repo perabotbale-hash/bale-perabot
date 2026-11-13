@@ -15,7 +15,7 @@ async function editProduct(id){
   const {data:c,error:ce}=await sb.from('product_costs').select('cost_price').eq('product_id',id).maybeSingle();if(ce)throw ce;
   await loadProductCategories();
   $('editProductId').value=id;$('editProductName').value=p.name||'';$('editProductPrice').value=formatMoney(p.selling_price||0);$('editProductCost').value=formatMoney(c?.cost_price||0);$('editProductStock').value=Number(p.stock||0);$('editProductMin').value=Number(p.min_stock??1);$('editProductCategory').innerHTML=$('newProductCategory').innerHTML;$('editProductCategory').value=p.category_id||'';$('editProductForm').style.display='block';$('editProductMsg').textContent='Mengedit: '+p.name;
-  $('editProductForm').scrollIntoView({behavior:'smooth',block:'nearest'});
+  // Form tetap pada posisi panel agar tidak meloncat saat barang dipilih.
  }catch(e){msg('editProductMsg',e.message,'err');}
 }
 async function saveEditedProduct(){
@@ -560,10 +560,24 @@ input:focus,select:focus{outline:2px solid #ffdf00;border-color:#0646a8}
 }
 
 @media(min-width:761px){
- #barangMenu #editProductForm{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 16px;grid-column:1/-1}
- #barangMenu #editProductForm label{align-self:end}
- #barangMenu #editProductForm input,#barangMenu #editProductForm select{min-width:0}
- #barangMenu #editProductForm button,#barangMenu #editProductForm .note{grid-column:1/-1}
+ /* Edit Barang: tata letak ringkas agar seluruh formulir terlihat dalam satu layar */
+ #barangMenu>.management-panel[data-management-panel="2"]{padding:10px 14px;row-gap:2px;align-content:start}
+ #barangMenu>.management-panel[data-management-panel="2"] h3{margin-bottom:4px!important}
+ #barangMenu>.management-panel[data-management-panel="2"]>label{margin:2px 0;align-self:center}
+ #barangMenu>.management-panel[data-management-panel="2"]>input{padding:7px 9px;min-height:34px}
+ #barangMenu>.management-panel[data-management-panel="2"]>.search-results{max-height:9vh;overflow:auto}
+ #barangMenu #editProductForm{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 14px;grid-column:1/-1;align-content:start}
+ #barangMenu #editProductForm label{align-self:end;margin:2px 0 1px}
+ #barangMenu #editProductForm input,#barangMenu #editProductForm select{min-width:0;padding:6px 9px;min-height:33px}
+ #barangMenu #editProductForm button,#barangMenu #editProductForm .note{grid-column:1/-1;margin-top:3px}
+}
+@media(max-height:800px) and (min-width:761px){
+ #barangMenu>.management-panel[data-management-panel="2"]{padding:7px 12px}
+ #barangMenu>.management-panel[data-management-panel="2"] h3{font-size:15px;margin-bottom:2px!important}
+ #barangMenu #editProductForm{gap:1px 12px}
+ #barangMenu #editProductForm label{font-size:12px}
+ #barangMenu #editProductForm input,#barangMenu #editProductForm select{padding:4px 8px;min-height:29px}
+ #barangMenu>.management-panel[data-management-panel="2"]>input{padding:5px 8px;min-height:30px}
 }
 </style></head>
 <body>
