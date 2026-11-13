@@ -2036,4 +2036,347 @@ async function repairOldCost(){
  }catch(e){msg('repairMsg',e.message,'err');}
 }
 
-</script></body></html>
+</script>
+<script>
+// Final override: keep the revised sales history (delete action) and report functions active.
+async function loadSales(){
+ try{
+  await guard();
+  const {data,error}=await sb.from('sales').select('id,invoice_number,total,paid_amount,payment_method,payment_status,created_at').order('created_at',{ascending:false}).limit(1000);
+  if(error)throw error;
+  window._baleSales=data||[];
+  if(!window._baleSales.length){$('salesHistory').textContent='Belum ada transaksi.';return;}
+  const dateKey=(v)=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Makassar',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(v));
+  const grouped={};
+  window._baleSales.forEach((s,i)=>{const k=dateKey(s.created_at);(grouped[k]??=[]).push({...s,_index:i});});
+  window._baleSalesByDate=grouped;
+  const label=(k)=>new Date(k+'T12:00:00+08:00').toLocaleDateString('id-ID',{weekday:'long',day:'2-digit',month:'long',year:'numeric',timeZone:'Asia/Makassar'});
+  const keys=Object.keys(grouped).sort().reverse();
+  $('salesHistory').innerHTML=`<div class="daily-tools">
+   <label for="salesDateSearch">Cari tanggal penjualan</label>
+   <input id="salesDateSearch" type="date" onchange="filterSalesByDate(this.value)">
+   <button class="secondary daily-all" type="button" onclick="filterSalesByDate('')">Semua Hari</button>
+  </div>
+  <div class="daily-tabs" id="salesDailyTabs">${keys.map(k=>`<button type="button" class="daily-tab" data-date="${k}" onclick="filterSalesByDate('${k}')">${label(k)}<small>${grouped[k].length} transaksi</small></button>`).join('')}</div>
+  <div id="salesDayResult" class="daily-result"></div>`;
+  filterSalesByDate(keys[0]);
+ }catch(e){$('salesHistory').textContent='Gagal memuat riwayat: '+e.message;}
+}
+window.filterSalesByDate=function(key){
+ const grouped=window._baleSalesByDate||{};
+ const keys=Object.keys(grouped).sort().reverse();
+ const chosen=key&&grouped[key]?key:'';
+ document.querySelectorAll('#salesDailyTabs .daily-tab').forEach(b=>b.classList.toggle('active',b.dataset.date===chosen));
+ const input=$('salesDateSearch');if(input&&input.value!==key)input.value=key||'';
+ const rows=chosen?grouped[chosen]:keys.flatMap(k=>grouped[k]);
+ const label=chosen?new Date(chosen+'T12:00:00+08:00').toLocaleDateString('id-ID',{weekday:'long',day:'2-digit',month:'long',year:'numeric',timeZone:'Asia/Makassar'}):'Semua Hari';
+ const total=rows.reduce((n,s)=>n+Number(s.total||0),0);
+ $('salesDayResult').innerHTML=`<h3>${label}</h3><p>${rows.length} transaksi · Total ${rupiah(total)}</p>
+  <div class="daily-table-wrap"><table><thead><tr><th>Invoice</th><th>Total</th><th>Status</th><th>Struk</th><th>Hapus</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x.invoice_number||'-')}<br><span class="small">${new Date(x.created_at).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})}</span></td><td>${rupiah(x.total)}</td><td>${esc(x.payment_status||'-')}</td><td><button class="secondary" onclick="showReceipt(${x._index})">Lihat / Cetak</button></td><td><button type="button" class="secondary" onclick="deleteSale('${x.id}')">Hapus</button></td></tr>`).join('')||'<tr><td colspan="5">Tidak ada transaksi pada tanggal ini.</td></tr>'}</tbody></table></div>`;
+};
+
+async function deleteSale(saleId){
+ try{
+  await guard();
+  if(profile?.role!=='admin')throw Error('Hanya Admin yang boleh menghapus transaksi.');
+  const sale=(window._baleSales||[]).find(x=>x.id===saleId);
+  if(!sale)throw Error('Transaksi tidak ditemukan. Muat ulang riwayat.');
+  const isPaid=sale.payment_status==='paid';
+  const action=isPaid
+   ? 'Transaksi '+(sale.invoice_number||'')+' akan dihapus dan seluruh stok barang pada nota ini akan dikembalikan. Lanjutkan?'
+   : 'Transaksi '+(sale.invoice_number||'')+' berstatus '+(sale.payment_status||'tidak diketahui')+'. Transaksi akan dihapus tanpa pengembalian stok. Lanjutkan?';
+  if(!confirm(action))return;
+  const {data,error}=await sb.rpc('delete_sale_and_restore_stock',{p_sale_id:saleId});
+  if(error)throw error;
+  if(data&&data.ok===false)throw Error(data.message||'Penghapusan ditolak.');
+  alert('Transaksi berhasil dihapus.'+(isPaid?' Stok barang sudah dikembalikan.':''));
+  await loadProducts();
+  await loadSales();
+  if(typeof loadReport==='function')await loadReport();
+ }catch(e){
+  alert('Transaksi tidak dihapus: '+(e.message||e));
+ }
+}
+
+async function loadReport(){
+ try{
+  await guard();
+  const {data:sales,error}=await sb.from('sales').select('id,total,payment_status,created_at').order('created_at',{ascending:false});
+  if(error)throw error;
+  const paid=(sales||[]).filter(x=>x.payment_status==='paid');
+  const ids=paid.map(x=>x.id);
+  let items=[];
+  if(ids.length){
+   const {data,error:ie}=await sb.from('sale_items').select('sale_id,product_id,product_name,quantity,cost_price,selling_price,subtotal').in('sale_id',ids);
+   if(ie)throw ie;
+   items=data||[];
+  }
+  // For old sale items whose saved cost is zero, use the product's current cost as an estimate only.
+  const missingProductIds=[...new Set(items.filter(x=>(x.cost_price===null||Number(x.cost_price)<=0)&&x.product_id).map(x=>x.product_id))];
+  let currentCosts=new Map();
+  if(missingProductIds.length){
+   const {data:costRows,error:ce}=await sb.from('product_costs').select('product_id,cost_price').in('product_id',missingProductIds);
+   if(ce)throw ce;
+   currentCosts=new Map((costRows||[]).map(x=>[x.product_id,Number(x.cost_price)]));
+  }
+  let modal=0,knownRevenue=0,estimatedCount=0,unknownCount=0;
+  for(const x of items){
+   let c=Number(x.cost_price||0);
+   if(c<=0 && x.product_id && currentCosts.has(x.product_id)){
+    c=currentCosts.get(x.product_id);estimatedCount++;
+   }else if(c<=0){unknownCount++;}
+   else{}
+   if(c>0){
+    modal+=c*Number(x.quantity||0);
+    knownRevenue+=Number(x.subtotal||0);
+   }
+  }
+  const profit=knownRevenue-modal;
+  const total=paid.reduce((a,x)=>a+Number(x.total||0),0);
+  // Kelompokkan tanggal berdasarkan waktu toko di zona WITA (Sumbawa/Bali).
+  const dateKeyWita=(value)=>{
+   const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Makassar',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(value));
+   const get=(t)=>parts.find(p=>p.type===t)?.value||'';
+   return get('year')+'-'+get('month')+'-'+get('day');
+  };
+  const shiftDate=(key,days)=>{const [y,m,d]=key.split('-').map(Number);const dt=new Date(Date.UTC(y,m-1,d+days));return dt.toISOString().slice(0,10);};
+  const daily={};
+  paid.forEach(s=>{const k=dateKeyWita(s.created_at);(daily[k]??=[]).push(s);});
+  const keys=Object.keys(daily).sort().reverse();
+  const dateLabel=(key)=>new Date(key+'T12:00:00+08:00').toLocaleDateString('id-ID',{weekday:'long',day:'2-digit',month:'long',year:'numeric',timeZone:'Asia/Makassar'});
+  const allTotal=paid.reduce((a,x)=>a+Number(x.total||0),0);
+  $('report').innerHTML=`<div class="daily-tools" style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+    <div><label for="reportPrintPeriod">Periode cetak</label><select id="reportPrintPeriod"><option value="day">Per Hari</option><option value="week">Per Minggu</option><option value="month">Per Bulan</option></select></div>
+    <div><label for="reportPrintDate">Tanggal acuan</label><input id="reportPrintDate" type="date" value="${keys[0]||dateKeyWita(new Date())}"></div>
+    <button type="button" class="secondary" onclick="printReportPeriod()">Cetak Laporan</button>
+   </div>
+   <div class="daily-tools">
+    <label for="reportDateSearch">Cari laporan tanggal</label>
+    <input id="reportDateSearch" type="date" onchange="filterReportByDate(this.value)">
+    <button class="secondary daily-all" type="button" onclick="filterReportByDate('')">Semua Hari</button>
+   </div>
+   <div class="daily-summary-line">Total seluruh hari: <b>${paid.length} transaksi</b> · Omzet <b>${rupiah(allTotal)}</b></div>
+   <div class="daily-tabs" id="reportDailyTabs">${keys.map(k=>`<button type="button" class="daily-tab" data-date="${k}" onclick="filterReportByDate('${k}')">${dateLabel(k)}<small>${daily[k].length} transaksi · ${rupiah(daily[k].reduce((a,x)=>a+Number(x.total||0),0))}</small></button>`).join('')||'<p>Belum ada transaksi lunas.</p>'}</div>
+   <div id="reportDayResult" class="daily-result"></div>`;
+  window._baleReportDaily={daily,items,currentCosts};
+  if(keys.length)filterReportByDate(keys[0]);
+  else $('reportDayResult').textContent='Belum ada laporan harian.';
+ }catch(e){$('report').textContent='Laporan gagal dimuat: '+e.message;}
+}
+
+window.filterReportByDate=function(key){
+ const state=window._baleReportDaily;if(!state)return;
+ const {daily,items,currentCosts}=state;
+ const keys=Object.keys(daily).sort().reverse();
+ const chosen=key&&daily[key]?key:'';
+ document.querySelectorAll('#reportDailyTabs .daily-tab').forEach(b=>b.classList.toggle('active',b.dataset.date===chosen));
+ const input=$('reportDateSearch');if(input&&input.value!==key)input.value=key||'';
+ const sales=chosen?daily[chosen]:keys.flatMap(k=>daily[k]);
+ const ids=new Set(sales.map(s=>s.id));
+ const rows=items.filter(x=>ids.has(x.sale_id));
+ let modal=0,revenue=0,estimated=0,unknown=0,qty=0;
+ rows.forEach(x=>{
+  let c=Number(x.cost_price||0);
+  if(c<=0&&x.product_id&&currentCosts.has(x.product_id)){c=currentCosts.get(x.product_id);estimated++;}
+  else if(c<=0)unknown++;
+  if(c>0){modal+=c*Number(x.quantity||0);revenue+=Number(x.subtotal||0);}
+  qty+=Number(x.quantity||0);
+ });
+ const total=sales.reduce((a,x)=>a+Number(x.total||0),0);
+ const profit=revenue-modal;
+ const label=chosen?new Date(chosen+'T12:00:00+08:00').toLocaleDateString('id-ID',{weekday:'long',day:'2-digit',month:'long',year:'numeric',timeZone:'Asia/Makassar'}):'Semua Hari';
+ $('reportDayResult').innerHTML=`<h3>${label}</h3>
+  <div class="daily-kpis"><div><small>Transaksi lunas</small><b>${sales.length}</b></div><div><small>Omzet</small><b>${rupiah(total)}</b></div><div><small>Jumlah barang</small><b>${qty}</b></div><div><small>Modal terhitung</small><b>${rupiah(modal)}</b></div><div><small>Perkiraan laba kotor</small><b>${rupiah(profit)}</b></div></div>
+  <p class="small">Catatan: ${estimated?estimated+' rincian memakai harga modal saat ini sebagai perkiraan. ':''}${unknown?unknown+' rincian belum memiliki data modal. ':''}Laba kotor belum dikurangi pengeluaran toko.</p>`;
+};
+
+
+window.printReportPeriod=function(){
+ try{
+  const state=window._baleReportDaily;if(!state)throw Error('Hitung laporan terlebih dahulu.');
+  const period=$('reportPrintPeriod').value;
+  const chosen=$('reportPrintDate').value;
+  if(!chosen)throw Error('Pilih tanggal laporan.');
+  const parse=(k)=>{const [y,m,d]=k.split('-').map(Number);return new Date(Date.UTC(y,m-1,d));};
+  const key=(dt)=>dt.toISOString().slice(0,10);
+  let start=chosen,end=chosen,title='Laporan Harian';
+  if(period==='week'){
+   const dt=parse(chosen);const day=(dt.getUTCDay()+6)%7;
+   start=key(new Date(dt.getTime()-day*86400000));
+   end=key(new Date(parse(start).getTime()+6*86400000));
+   title='Laporan Mingguan';
+  }else if(period==='month'){
+   start=chosen.slice(0,7)+'-01';
+   const [y,m]=chosen.split('-').map(Number);
+   end=key(new Date(Date.UTC(y,m,0)));
+   title='Laporan Bulanan';
+  }
+  const allSales=Object.values(state.daily).flat();
+  const sales=allSales.filter(s=>{
+   const k=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Makassar',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(s.created_at));
+   return k>=start&&k<=end;
+  }).sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
+  const ids=new Set(sales.map(s=>s.id));
+  const rows=state.items.filter(x=>ids.has(x.sale_id));
+  const qty=rows.reduce((n,x)=>n+Number(x.quantity||0),0);
+  const total=sales.reduce((n,s)=>n+Number(s.total||0),0);
+  const details=sales.map(s=>{
+   const lines=rows.filter(x=>x.sale_id===s.id);
+   return `<tr><td>${esc(s.invoice_number||'-')}<br>${new Date(s.created_at).toLocaleString('id-ID',{timeZone:'Asia/Makassar'})}</td><td>${lines.map(x=>`${esc(x.product_name||'Barang')} × ${Number(x.quantity||0)} — ${rupiah(x.subtotal||Number(x.selling_price||0)*Number(x.quantity||0))}`).join('<br>')}</td><td>${rupiah(s.total)}</td></tr>`;
+  }).join('');
+  const w=window.open('','_blank');if(!w)throw Error('Pop-up diblokir. Izinkan pop-up untuk mencetak laporan.');
+  w.document.write(`<!doctype html><html lang="id"><head><meta charset="utf-8"><title>${title} BALE PERABOT</title><style>body{font:12px Arial,sans-serif;color:#111;margin:20px}h1,h2,p{text-align:center;margin:5px}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{border:1px solid #777;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.summary{margin-top:14px;display:flex;justify-content:space-between;font-weight:bold}@media print{body{margin:10mm}}
+
+/* Final: management forms reuse the proven two-screen transaction layout */
+@media screen and (min-width: 761px) {
+  #barangMenu .stock-in-layout.transaction-two-screen,
+  #barangMenu .edit-product-layout.transaction-two-screen {
+    display: grid !important;
+    grid-template-columns: minmax(260px, .78fr) minmax(360px, 1.22fr) !important;
+    grid-template-rows: auto !important;
+    gap: 14px !important;
+    align-items: stretch !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  #barangMenu .stock-in-layout.transaction-two-screen > .transaction-left,
+  #barangMenu .stock-in-layout.transaction-two-screen > .transaction-right,
+  #barangMenu .edit-product-layout.transaction-two-screen > .transaction-left,
+  #barangMenu .edit-product-layout.transaction-two-screen > .transaction-right {
+    display: flex !important;
+    flex-direction: column !important;
+    grid-row: 1 !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    float: none !important;
+    position: relative !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    padding: 14px !important;
+    border: 1px solid #d5dbea !important;
+    border-radius: 12px !important;
+    background: #fff !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+  }
+  #barangMenu .stock-in-layout.transaction-two-screen > .transaction-left,
+  #barangMenu .edit-product-layout.transaction-two-screen > .transaction-left { grid-column: 1 !important; }
+  #barangMenu .stock-in-layout.transaction-two-screen > .transaction-right,
+  #barangMenu .edit-product-layout.transaction-two-screen > .transaction-right { grid-column: 2 !important; }
+  #barangMenu .edit-product-layout #editProductForm {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    gap: 5px 10px !important;
+    width: 100% !important;
+  }
+  #barangMenu #editProductResults, #barangMenu #stockInSearchResults {
+    display: flex !important; flex-direction: column !important; width: 100% !important;
+    min-width: 0 !important; max-height: 42vh !important; overflow-y: auto !important;
+    padding: 8px !important; border: 1px solid #d8dce8 !important;
+    border-radius: 8px !important; background: #fff !important;
+  }
+}
+@media screen and (max-width: 760px) {
+  #barangMenu .stock-in-layout.transaction-two-screen,
+  #barangMenu .edit-product-layout.transaction-two-screen {
+    display: grid !important; grid-template-columns: minmax(0,1fr) !important; gap: 10px !important;
+  }
+  #barangMenu .stock-in-layout.transaction-two-screen > .transaction-left,
+  #barangMenu .stock-in-layout.transaction-two-screen > .transaction-right,
+  #barangMenu .edit-product-layout.transaction-two-screen > .transaction-left,
+  #barangMenu .edit-product-layout.transaction-two-screen > .transaction-right {
+    grid-column: 1 !important; grid-row: auto !important; min-width: 0 !important;
+  }
+}
+
+
+/* PERBAIKAN FINAL LAYOUT DUA LAYAR MANAJEMEN BARANG */
+@media screen and (min-width: 761px) {
+  #barangMenu .edit-product-layout.transaction-two-screen,
+  #barangMenu .stock-in-layout.transaction-two-screen {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    grid-template-rows: auto !important;
+    grid-auto-flow: row !important;
+    gap: 16px !important;
+    align-items: stretch !important;
+    justify-content: stretch !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-pane,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-pane {
+    display: flex !important;
+    flex-direction: column !important;
+    grid-row: 1 !important;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+    align-self: stretch !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-fields,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-fields {
+    grid-column: 1 !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-search-pane,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-search-pane {
+    grid-column: 2 !important;
+  }
+  #barangMenu .edit-product-fields #editProductForm {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    gap: 6px 12px !important;
+  }
+  #barangMenu .edit-product-fields #editProductForm input,
+  #barangMenu .edit-product-fields #editProductForm select,
+  #barangMenu .edit-product-search-pane input,
+  #barangMenu .stock-in-pane input {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+  #barangMenu .edit-product-search-pane > *,
+  #barangMenu .stock-in-search-pane > * {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+}
+@media screen and (max-width: 760px) {
+  #barangMenu .edit-product-layout.transaction-two-screen,
+  #barangMenu .stock-in-layout.transaction-two-screen {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+    width: 100% !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-pane,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-pane {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+}
+
+</style></head><body><h1>BALE PERABOT</h1><h2>${title}</h2><p>Periode: ${start} sampai ${end}</p><table><thead><tr><th>Nota / Waktu</th><th>Rincian Barang</th><th>Total</th></tr></thead><tbody>${details||'<tr><td colspan="3">Tidak ada transaksi lunas pada periode ini.</td></tr>'}</tbody></table><div class="summary"><span>Jumlah transaksi: ${sales.length}</span><span>Jumlah barang: ${qty}</span><span>Total omzet: ${rupiah(total)}</span></div><script>window.onload=()=>setTimeout(()=>window.print(),300)<\/script></body></html>`);
+  w.document.close();
+ }catch(e){alert('Laporan tidak dapat dicetak: '+e.message);}
+};
+
+
+window.loadReport = loadReport;
+document.addEventListener('DOMContentLoaded',()=>{const b=document.getElementById('reportBtn');if(b)b.addEventListener('click',()=>loadReport());});
+
+
+
+</script>
+</body></html>
