@@ -92,9 +92,31 @@ window.filterSalesByDate=function(key){
  const label=chosen?new Date(chosen+'T12:00:00+08:00').toLocaleDateString('id-ID',{weekday:'long',day:'2-digit',month:'long',year:'numeric',timeZone:'Asia/Makassar'}):'Semua Hari';
  const total=rows.reduce((n,s)=>n+Number(s.total||0),0);
  $('salesDayResult').innerHTML=`<h3>${label}</h3><p>${rows.length} transaksi · Total ${rupiah(total)}</p>
-  <div class="daily-table-wrap"><table><thead><tr><th>Invoice</th><th>Total</th><th>Status</th><th>Struk</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x.invoice_number||'-')}<br><span class="small">${new Date(x.created_at).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})}</span></td><td>${rupiah(x.total)}</td><td>${esc(x.payment_status||'-')}</td><td><button class="secondary" onclick="showReceipt(${x._index})">Lihat / Cetak</button></td></tr>`).join('')||'<tr><td colspan="4">Tidak ada transaksi pada tanggal ini.</td></tr>'}</tbody></table></div>`;
+  <div class="daily-table-wrap"><table><thead><tr><th>Invoice</th><th>Total</th><th>Status</th><th>Struk</th><th>Hapus</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x.invoice_number||'-')}<br><span class="small">${new Date(x.created_at).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})}</span></td><td>${rupiah(x.total)}</td><td>${esc(x.payment_status||'-')}</td><td><button class="secondary" onclick="showReceipt(${x._index})">Lihat / Cetak</button></td><td><button type="button" class="secondary" onclick="deleteSale('${x.id}')">Hapus</button></td></tr>`).join('')||'<tr><td colspan="5">Tidak ada transaksi pada tanggal ini.</td></tr>'}</tbody></table></div>`;
 };
 
+async function deleteSale(saleId){
+ try{
+  await guard();
+  if(profile?.role!=='admin')throw Error('Hanya Admin yang boleh menghapus transaksi.');
+  const sale=(window._baleSales||[]).find(x=>x.id===saleId);
+  if(!sale)throw Error('Transaksi tidak ditemukan. Muat ulang riwayat.');
+  const isPaid=sale.payment_status==='paid';
+  const action=isPaid
+   ? 'Transaksi '+(sale.invoice_number||'')+' akan dihapus dan seluruh stok barang pada nota ini akan dikembalikan. Lanjutkan?'
+   : 'Transaksi '+(sale.invoice_number||'')+' berstatus '+(sale.payment_status||'tidak diketahui')+'. Transaksi akan dihapus tanpa pengembalian stok. Lanjutkan?';
+  if(!confirm(action))return;
+  const {data,error}=await sb.rpc('delete_sale_and_restore_stock',{p_sale_id:saleId});
+  if(error)throw error;
+  if(data&&data.ok===false)throw Error(data.message||'Penghapusan ditolak.');
+  alert('Transaksi berhasil dihapus.'+(isPaid?' Stok barang sudah dikembalikan.':''));
+  await loadProducts();
+  await loadSales();
+  if(typeof loadReport==='function')await loadReport();
+ }catch(e){
+  alert('Transaksi tidak dihapus: '+(e.message||e));
+ }
+}
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function showReceipt(i){
  try{
@@ -1633,6 +1655,7 @@ document.addEventListener('input',e=>{
  }
 });
 let checkoutStage=1;
+let checkoutInProgress=false;
 function goCheckoutStage(stage){
  if(!cart.length){msg('saleMsg','Keranjang masih kosong. Scan atau tambahkan barang dahulu.','err');return;}
  const total=cart.reduce((a,x)=>a+x.price*x.qty,0);
@@ -1684,7 +1707,14 @@ async function printReceiptFromPreview(){
  await showReceipt(idx);
 }
 async function checkout(confirmed=false){
- if(!confirmed){showCheckoutConfirm();return;}
+ if(!confirmed){if(checkoutInProgress)return;showCheckoutConfirm();return;}
+ // Kunci langsung sebelum proses async dimulai agar klik berulang saat aplikasi lambat diabaikan.
+ if(checkoutInProgress)return;
+ checkoutInProgress=true;
+ let saleCreated=false;
+ let transactionCompleted=false;
+ const confirmButton=document.querySelector('#checkoutConfirm .pay-button');
+ if(confirmButton){confirmButton.disabled=true;confirmButton.textContent='MENYIMPAN TRANSAKSI...';}
  closeCheckoutConfirm();
  try{
  await guard();if(!cart.length)throw Error('Keranjang masih kosong.');
@@ -1703,6 +1733,7 @@ async function checkout(confirmed=false){
  // Sequential writes: this remains a controlled transaction flow, not an atomic database transaction.
  const {data:sale,error:se}=await sb.from('sales').insert({invoice_number:invoice,cashier_id:profile.id,customer_id:null,total,paid_amount:total,payment_method:$('method').value,payment_status:'paid'}).select('id').single();
  if(se)throw Error('Transaksi belum tersimpan: '+se.message);
+ saleCreated=true;
  const items=cart.map(x=>({sale_id:sale.id,product_id:x.id,product_name:x.name,quantity:x.qty,cost_price:costMap.get(x.id),selling_price:x.price,subtotal:x.price*x.qty}));
  const {error:ie}=await sb.from('sale_items').insert(items);
  if(ie)throw Error('Nomor transaksi '+invoice+' sudah tercatat, tetapi rincian gagal disimpan. Jangan ulangi transaksi. Hubungi admin untuk pemeriksaan: '+ie.message);
@@ -1712,11 +1743,22 @@ async function checkout(confirmed=false){
  const methodLabel=$('method').selectedOptions[0]?.textContent||$('method').value;
  cart=[];renderCart();if($('cashReceived'))$('cashReceived').value='';updateChange();goCheckoutStage(1);msg('saleMsg','Transaksi berhasil: '+invoice+'. Pembayaran lunas. Stok sudah diperbarui.','ok');await loadProducts();await loadSales();
  openReceiptPreview({invoice_number:invoice,total},receiptItems,received,methodLabel);
+ transactionCompleted=true;
  }catch(e){msg('saleMsg',e.message,'err');}
+ finally{
+  // Jika header transaksi sudah tersimpan tetapi proses lanjutan gagal, kunci tetap aktif
+  // agar kasir tidak mengulang dan membuat transaksi ganda. Muat ulang setelah pemeriksaan admin.
+  if(!saleCreated||transactionCompleted){
+   checkoutInProgress=false;
+   if(confirmButton){confirmButton.disabled=false;confirmButton.textContent='KONFIRMASI & SIMPAN PEMBAYARAN';}
+  }else if(confirmButton){
+   confirmButton.disabled=true;confirmButton.textContent='PERLU PEMERIKSAAN ADMIN';
+  }
+ }
 }
 (function(){let u=localStorage.getItem('bale_v13_url'),k=localStorage.getItem('bale_v13_key');if(u)$('url').value=u;if(k)$('key').value=k;if(u&&k){init();msg('conn','Pengaturan koneksi ditemukan di perangkat ini.','ok');}})();
 
-async function loadSales(){
+async function loadSalesLegacy(){
  try{
   await guard();
   const {data,error}=await sb.from('sales').select('id,invoice_number,total,paid_amount,payment_method,payment_status,created_at').order('created_at',{ascending:false}).limit(50);
