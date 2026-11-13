@@ -42,8 +42,8 @@ async function saveEditedProduct(){
   $('editProductStock').value='';
   $('editProductMin').value='';
   $('editProductCategory').value='';
-  $('editProductSearch').value='';
-  $('editProductResults').innerHTML='';
+  // Pertahankan kata pencarian dan tampilkan kembali hasil agar barang berikutnya bisa dipilih.
+  renderManagementSearches();
  }catch(e){msg('editProductMsg',e.message,'err');}
 }
 
