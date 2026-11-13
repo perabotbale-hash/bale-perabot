@@ -608,6 +608,83 @@ window.printReportPeriod=function(){
   }
 }
 
+
+/* PERBAIKAN FINAL LAYOUT DUA LAYAR MANAJEMEN BARANG */
+@media screen and (min-width: 761px) {
+  #barangMenu .edit-product-layout.transaction-two-screen,
+  #barangMenu .stock-in-layout.transaction-two-screen {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    grid-template-rows: auto !important;
+    grid-auto-flow: row !important;
+    gap: 16px !important;
+    align-items: stretch !important;
+    justify-content: stretch !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-pane,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-pane {
+    display: flex !important;
+    flex-direction: column !important;
+    grid-row: 1 !important;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+    align-self: stretch !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-fields,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-fields {
+    grid-column: 1 !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-search-pane,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-search-pane {
+    grid-column: 2 !important;
+  }
+  #barangMenu .edit-product-fields #editProductForm {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    gap: 6px 12px !important;
+  }
+  #barangMenu .edit-product-fields #editProductForm input,
+  #barangMenu .edit-product-fields #editProductForm select,
+  #barangMenu .edit-product-search-pane input,
+  #barangMenu .stock-in-pane input {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+  #barangMenu .edit-product-search-pane > *,
+  #barangMenu .stock-in-search-pane > * {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+}
+@media screen and (max-width: 760px) {
+  #barangMenu .edit-product-layout.transaction-two-screen,
+  #barangMenu .stock-in-layout.transaction-two-screen {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+    width: 100% !important;
+  }
+  #barangMenu .edit-product-layout.transaction-two-screen > .edit-product-pane,
+  #barangMenu .stock-in-layout.transaction-two-screen > .stock-in-pane {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+}
+
 </style></head><body><h1>BALE PERABOT</h1><h2>${title}</h2><p>Periode: ${start} sampai ${end}</p><table><thead><tr><th>Nota / Waktu</th><th>Rincian Barang</th><th>Total</th></tr></thead><tbody>${details||'<tr><td colspan="3">Tidak ada transaksi lunas pada periode ini.</td></tr>'}</tbody></table><div class="summary"><span>Jumlah transaksi: ${sales.length}</span><span>Jumlah barang: ${qty}</span><span>Total omzet: ${rupiah(total)}</span></div><script>window.onload=()=>setTimeout(()=>window.print(),300)<\/script></body></html>`);
   w.document.close();
  }catch(e){alert('Laporan tidak dapat dicetak: '+e.message);}
