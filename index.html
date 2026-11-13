@@ -23,6 +23,11 @@ async function saveEditedProduct(){
   await guard();const id=$('editProductId').value,name=$('editProductName').value.trim(),cost=parseMoney($('editProductCost').value),price=parseMoney($('editProductPrice').value);
   if(!id||!name)throw Error('Pilih barang dan isi nama barang.');if(!Number.isFinite(cost)||cost<0||!Number.isFinite(price)||price<0)throw Error('Harga modal dan harga jual harus diisi dengan benar.');
   const min=Number($('editProductMin').value);if(!Number.isInteger(min)||min<0)throw Error('Minimal stok harus bilangan bulat minimal 0.');
+  const normalizeProductName=value=>String(value||'').normalize('NFKC').trim().replace(/\\s+/g,' ').toLocaleLowerCase('id-ID');
+  const {data:nameRows,error:nameErr}=await sb.from('products').select('id,name').neq('id',id);
+  if(nameErr)throw nameErr;
+  const duplicate=(nameRows||[]).find(row=>normalizeProductName(row.name)===normalizeProductName(name));
+  if(duplicate)throw Error('Nama barang sudah digunakan barang lain. Silakan gunakan nama yang berbeda.');
   const {error:up}=await sb.from('products').update({name,selling_price:price,category_id:$('editProductCategory').value||null,min_stock:min}).eq('id',id);if(up)throw up;
   const {error:uc}=await sb.from('product_costs').upsert({product_id:id,cost_price:cost},{onConflict:'product_id'});if(uc)throw uc;
   msg('editProductMsg','Perubahan barang berhasil disimpan.','ok');await loadProducts();
@@ -832,6 +837,11 @@ async function addNewProduct(){
   if($('newProductPrice').value===''||!Number.isFinite(price)||price<0)throw Error('Isi harga jual dengan benar.');
   if(!Number.isInteger(stock)||stock<0)throw Error('Stok awal harus bilangan bulat minimal 0.');
   if(!Number.isInteger(min)||min<0)throw Error('Batas stok minimum harus bilangan bulat minimal 0.');
+  const normalizeProductName=value=>String(value||'').normalize('NFKC').trim().replace(/\\s+/g,' ').toLocaleLowerCase('id-ID');
+  const {data:nameRows,error:nameErr}=await sb.from('products').select('id,name');
+  if(nameErr)throw nameErr;
+  const duplicate=(nameRows||[]).find(row=>normalizeProductName(row.name)===normalizeProductName(name));
+  if(duplicate)throw Error('Barang ini sudah terdaftar. Silakan gunakan menu Edit Barang atau Tambah Stok.');
   const {data:existing,error:ce}=await sb.from('products').select('code');if(ce)throw ce;
   let max=0;for(const x of (existing||[])){const m=String(x.code||'').match(/^BP(\d+)$/i);if(m)max=Math.max(max,Number(m[1]));}
   const code='BP'+String(max+1).padStart(6,'0');
