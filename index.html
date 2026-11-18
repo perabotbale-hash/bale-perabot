@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BALE PERABOT V25</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#1646b4">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 <script>
@@ -2467,5 +2473,15 @@ document.addEventListener('DOMContentLoaded',()=>{const b=document.getElementByI
 
 
 
+</script>
+
+<script>
+// Register PWA support. This does not touch Supabase or business data.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js', { scope: './' })
+      .catch((error) => console.warn('PWA service worker:', error));
+  });
+}
 </script>
 </body></html>
